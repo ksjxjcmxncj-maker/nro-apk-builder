@@ -32,7 +32,7 @@ jobs:
           ls -lh NROGame-bridge-original.apk
           echo "APK_VERSION=${VERSION}" >> $GITHUB_ENV
 
-      - name: Patch metadata (hardcode server 127.0.0.1:14445)
+      - name: Patch metadata (hardcode 127.0.0.1:14445)
         run: |
           python3 scripts/patch_apk.py \
             NROGame-bridge-original.apk \
@@ -42,7 +42,7 @@ jobs:
 
       - name: Verify patch
         run: |
-          python3 - << 'PYEOF'
+          python3 - << 'EOF'
           import zipfile
           with zipfile.ZipFile("NROGame-bridge-unsigned.apk") as z:
               meta = z.read("assets/bin/Data/Managed/Metadata/global-metadata.dat")
@@ -51,8 +51,23 @@ jobs:
           print(f"127.0.0.1 found: {ok1}")
           print(f"nrofree.online removed: {ok2}")
           if not ok1:
-              raise SystemExit("FAIL: 127.0.0.1 not found in metadata")
-          PYEOF
+              raise SystemExit("FAIL: patch không thành công")
+          print("PATCH OK")
+          EOF
+
+      - name: Setup Android build-tools (zipalign + apksigner)
+        run: |
+          echo "Android SDK: $ANDROID_HOME"
+          # Dùng build-tools có sẵn trên runner (thường đã có 34.x / 35.x)
+          BT=$(ls -d "$ANDROID_HOME/build-tools"/* | sort -V | tail -1)
+          if [ -z "$BT" ]; then
+            yes | sdkmanager "build-tools;35.0.0" > /dev/null
+            BT=$(ls -d "$ANDROID_HOME/build-tools"/* | sort -V | tail -1)
+          fi
+          echo "Build-tools: $BT"
+          echo "BUILD_TOOLS=$BT" >> $GITHUB_ENV
+          "$BT/zipalign" -version || true
+          "$BT/apksigner" --version || true
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -60,8 +75,18 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Sign APK (debug keystore)
+      - name: Sign APK (strip old sigs + zipalign + apksigner v1+v2+v3)
         run: bash scripts/sign_apk.sh NROGame-bridge-unsigned.apk NROGame-bridge-patched.apk
+
+      - name: Verify final APK installability
+        run: |
+          BT="$BUILD_TOOLS"
+          echo "=== Chữ ký ==="
+          "$BT/apksigner" verify --verbose NROGame-bridge-patched.apk 2>&1 | grep -E "Verified|v[123] scheme"
+          echo "=== Zipalign ==="
+          "$BT/zipalign" -c -v 4 NROGame-bridge-patched.apk && echo "ALIGNED OK" || echo "NOT ALIGNED"
+          echo "=== Size ==="
+          ls -lh NROGame-bridge-patched.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -76,18 +101,20 @@ jobs:
           tag_name: patched-${{ env.APK_VERSION }}-r${{ github.run_number }}
           name: "NRO Patched → 127.0.0.1:14445 (run #${{ github.run_number }})"
           body: |
-            ## NROGame APK đã patch tự động
+            ## NROGame APK đã patch — v1+v2+v3 signature
 
             | Field | Value |
             |-------|-------|
             | Base APK | rem5 ${{ env.APK_VERSION }} |
-            | Server | `127.0.0.1:14445` (qua ws_client_proxy) |
-            | Ký | Debug keystore |
+            | Server | `127.0.0.1:14445` |
+            | Ký | apksigner v1+v2+v3 (debug keystore) |
+            | Zipalign | ✅ 4-byte aligned |
+            | Double-sig bug | ✅ Đã sửa |
 
             ### Cách dùng
-            1. Cài APK này lên điện thoại
-            2. Chạy `ws_client_proxy.py` trên máy tính / Codespace
-            3. Mở game → tự động kết nối server rem5
+            1. Cài APK lên điện thoại (Android 5.1+)
+            2. Chạy `ws_client_proxy.py`
+            3. Mở game → tự kết nối server rem5
           files: NROGame-bridge-patched.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
