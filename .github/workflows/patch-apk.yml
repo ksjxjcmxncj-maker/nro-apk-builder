@@ -36,29 +36,28 @@ jobs:
         run: |
           python3 scripts/patch_apk.py \
             NROGame-bridge-original.apk \
-            NROGame-bridge-unsigned.apk \
+            NROGame-bridge-meta.apk \
             "127.0.0.1" \
             "14445"
 
-      - name: Verify patch
+      - name: Verify metadata patch
         run: |
           python3 - << 'EOF'
           import zipfile
-          with zipfile.ZipFile("NROGame-bridge-unsigned.apk") as z:
+          with zipfile.ZipFile("NROGame-bridge-meta.apk") as z:
               meta = z.read("assets/bin/Data/Managed/Metadata/global-metadata.dat")
           ok1 = b"127.0.0.1" in meta
           ok2 = b"nrofree.online" not in meta
           print(f"127.0.0.1 found: {ok1}")
           print(f"nrofree.online removed: {ok2}")
           if not ok1:
-              raise SystemExit("FAIL: patch không thành công")
-          print("PATCH OK")
+              raise SystemExit("FAIL: metadata patch không thành công")
+          print("METADATA PATCH OK")
           EOF
 
       - name: Setup Android build-tools (zipalign + apksigner)
         run: |
           echo "Android SDK: $ANDROID_HOME"
-          # Dùng build-tools có sẵn trên runner (thường đã có 34.x / 35.x)
           BT=$(ls -d "$ANDROID_HOME/build-tools"/* | sort -V | tail -1)
           if [ -z "$BT" ]; then
             yes | sdkmanager "build-tools;35.0.0" > /dev/null
@@ -66,14 +65,38 @@ jobs:
           fi
           echo "Build-tools: $BT"
           echo "BUILD_TOOLS=$BT" >> $GITHUB_ENV
-          "$BT/zipalign" -version || true
-          "$BT/apksigner" --version || true
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
+
+      - name: Install apktool
+        run: |
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O /tmp/apktool.jar
+          printf '#!/bin/bash\nexec java -jar /tmp/apktool.jar "$@"\n' > /tmp/apktool
+          chmod +x /tmp/apktool
+          /tmp/apktool --version
+
+      - name: Decompile APK với apktool (smali)
+        run: |
+          /tmp/apktool d NROGame-bridge-meta.apk -o /tmp/apk_out -f
+          echo "Smali files:"
+          find /tmp/apk_out/smali* -name "UnityPlayerActivity.smali" 2>/dev/null
+
+      - name: Patch smali — skip IP dialog (UnitySendMessage)
+        run: |
+          python3 scripts/patch_dialog.py /tmp/apk_out
+          echo "=== NroAutoConnectRunnable ==="
+          find /tmp/apk_out -name "NroAutoConnectRunnable.smali" -exec cat {} \;
+          echo "=== UnityPlayerActivity (injected section) ==="
+          find /tmp/apk_out -name "UnityPlayerActivity.smali" -exec grep -A30 "NRO AUTO-CONNECT" {} \;
+
+      - name: Rebuild APK với apktool
+        run: |
+          /tmp/apktool b /tmp/apk_out -o NROGame-bridge-unsigned.apk
+          ls -lh NROGame-bridge-unsigned.apk
 
       - name: Sign APK (strip old sigs + zipalign + apksigner v1+v2+v3)
         run: bash scripts/sign_apk.sh NROGame-bridge-unsigned.apk NROGame-bridge-patched.apk
@@ -101,20 +124,20 @@ jobs:
           tag_name: patched-${{ env.APK_VERSION }}-r${{ github.run_number }}
           name: "NRO Patched → 127.0.0.1:14445 (run #${{ github.run_number }})"
           body: |
-            ## NROGame APK đã patch — v1+v2+v3 signature
+            ## NROGame APK đã patch — tự động kết nối, không cần nhập IP
 
             | Field | Value |
             |-------|-------|
             | Base APK | rem5 ${{ env.APK_VERSION }} |
             | Server | `127.0.0.1:14445` |
-            | Ký | apksigner v1+v2+v3 (debug keystore) |
+            | Dialog IP | ✅ Tự động bỏ qua (UnitySendMessage smali patch) |
+            | Ký | apksigner v1+v2+v3 |
             | Zipalign | ✅ 4-byte aligned |
-            | Double-sig bug | ✅ Đã sửa |
 
             ### Cách dùng
             1. Cài APK lên điện thoại (Android 5.1+)
-            2. Chạy `ws_client_proxy.py`
-            3. Mở game → tự kết nối server rem5
+            2. Chạy `ws_client_proxy.py` trên Codespace
+            3. Mở game → sau ~5 giây tự kết nối, **không cần nhập IP**
           files: NROGame-bridge-patched.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
