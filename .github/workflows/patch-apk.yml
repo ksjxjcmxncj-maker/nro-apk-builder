@@ -1,0 +1,98 @@
+name: Patch & Release NROGame APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_version:
+        description: 'Version APK gốc từ rem5 (vd: v1.7.0)'
+        required: false
+        default: 'v1.7.0'
+      target_host:
+        description: 'IP/host đích (mặc định: 127.0.0.1)'
+        required: false
+        default: '127.0.0.1'
+      target_port:
+        description: 'Port đích (mặc định: 14445)'
+        required: false
+        default: '14445'
+  push:
+    branches: [ main ]
+    paths: [ 'scripts/**' ]
+
+jobs:
+  patch:
+    name: Patch APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download base APK từ rem5
+        run: |
+          VERSION="${{ github.event.inputs.source_version || 'v1.7.0' }}"
+          echo "Downloading NROGame-bridge.apk ${VERSION}..."
+          curl -fL \
+            "https://github.com/ksjxjcmxncj-maker/rem5/releases/download/${VERSION}/NROGame-bridge.apk" \
+            -o NROGame-bridge-original.apk
+          ls -lh NROGame-bridge-original.apk
+          echo "APK_VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Patch metadata (binary patch server string)
+        run: |
+          python3 scripts/patch_apk.py \
+            NROGame-bridge-original.apk \
+            NROGame-bridge-unsigned.apk \
+            "${{ github.event.inputs.target_host || '127.0.0.1' }}" \
+            "${{ github.event.inputs.target_port || '14445' }}"
+
+      - name: Verify patch
+        run: |
+          python3 - << 'EOF'
+          import zipfile
+          with zipfile.ZipFile("NROGame-bridge-unsigned.apk") as z:
+              meta = z.read("assets/bin/Data/Managed/Metadata/global-metadata.dat")
+          ok1 = b"127.0.0.1" in meta
+          ok2 = b"nrofree.online" not in meta
+          print(f"127.0.0.1 found: {ok1}")
+          print(f"nrofree.online removed: {ok2}")
+          if not ok1:
+              print("WARNING: 127.0.0.1 not found - patch may have failed!")
+          EOF
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Sign APK (debug keystore)
+        run: bash scripts/sign_apk.sh NROGame-bridge-unsigned.apk NROGame-bridge-patched.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NROGame-patched-${{ github.run_number }}
+          path: NROGame-bridge-patched.apk
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: patched-${{ env.APK_VERSION }}-r${{ github.run_number }}
+          name: "NRO Patched → 127.0.0.1:14445 (run #${{ github.run_number }})"
+          body: |
+            ## NROGame APK đã patch tự động
+
+            | Field | Value |
+            |-------|-------|
+            | Base APK | rem5 ${{ env.APK_VERSION }} |
+            | Patch | `nrofree.online` → `127.0.0.1:14445` |
+            | Ký | Debug keystore |
+
+            ### Cách dùng
+            1. Cài APK này lên điện thoại
+            2. Chạy `ws_client_proxy.py` trên máy tính
+            3. Mở game → tự động kết nối qua bridge
+          files: NROGame-bridge-patched.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
